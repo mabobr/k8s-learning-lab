@@ -1,8 +1,9 @@
 # -*- mode: ruby -*-
 # vi: set ft=ruby :
 
-# To build from scartch:
-# vagrant up --parallel
+# Check script: start-or-build-cluster.sh
+# NEXT is implement CNI on master - nodes are in notREADy state (2025-06-08)
+
 
 ############################################################################
 # Variables to consider
@@ -15,8 +16,8 @@ cpu_for_k8s_master = 2
 mem_for_k8s_worker = 4096
 cpu_for_k8s_worker = 2
 
-mem_for_support_vm = 4096
-cpu_for_support_vm = 2
+mem_for_proxy_vm = 4096
+cpu_for_proxy_vm = 2
 
 # FACLO is sec. too for kubernetes, default is false - it set to true - installation was not tested
 DO_INCLUDE_FALCO="false"
@@ -25,6 +26,11 @@ DO_INCLUDE_FALCO="false"
 # if DO_USE_PROXY == true, an outbound  filrewall will be activated on all nodes, nodes are not able to 
 # communucate to internet directly, ony via HTTP proxy, everything will be slow but secure ;)
 DO_USE_PROXY="true"
+
+POD_NETWORK_CIDR="10.99.0.0/16"
+
+# k8s version to install
+K8S_VERSION=1.33
 
 ############################################################################
 # End od variables
@@ -87,82 +93,6 @@ SCRIPT
 app_init_sh = <<-SCRIPT
 test $(hostname -s) == "proxy-lb" && exit 0
 
-if [[ -z ${POD_NETWORK_CIDR} ]] ; then
-    echo $0 error: Value for POD_NETWORK_CIDR not set >&2
-    exit 1
-fi
-
-#env | sort
-echo USING POD_NETWORK_CIDR=${POD_NETWORK_CIDR}
-
-HOSTNAME=$(hostname -s)
-
-# enabling firewall deny logs to debug network problems
-sed -i "s/LogDenied=.*/LogDenied=all/" /etc/firewalld/firewalld.conf
-systemctl reload firewalld
-
-#Create a configuration file for containerd:
-cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
-overlay
-br_netfilter
-EOF
-
-modprobe overlay || exit 1
-modprobe br_netfilter || exit 1
-
-#Set system configurations for Kubernetes networking:
-cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
-net.bridge.bridge-nf-call-ip6tables = 1
-EOF
-sysctl -q --system
-
-####################################################
-# selinux disable
-
-
-# installing container.io
-dnf config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo || exit 1
-dnf -y makecache || exit 1
-dnf install -y containerd.io curl git || exit 1
-# backup default config
-mv /etc/containerd/config.toml /etc/containerd/config.toml.bak
-containerd config default > /etc/containerd/config.toml || exit 1
-sed -i 's/SystemdCgroup \= false/SystemdCgroup \= true/g' /etc/containerd/config.toml || exit 1
-
-# if using proxy, configure env
-echo Configuring containerd to use http proxy
-mkdir -p /etc/systemd/system/containerd.service.d || exit 1
-cat <<EOF | sudo tee /etc/systemd/system/containerd.service.d/http-proxy.conf
-[Service]
-Environment="HTTP_PROXY=http://proxy-lb:3128"
-Environment="HTTPS_PROXY=http://proxy-lb:3128"
-Environment="NO_PROXY=localhost,10.0.0.0/8,192.168.0.0/16,127.0.0.0/8"
-EOF
-systemctl daemon-reload
-
-systemctl enable --now containerd.service || exit 1
-systemctl status containerd.service
-
-#####################################################
-# installing
-if [ ! -f /etc/yum.repos.d/kubernetes.repo ] ; then
-    cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
-[kubernetes]
-name=Kubernetes
-baseurl=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/
-enabled=1
-gpgcheck=1
-gpgkey=https://pkgs.k8s.io/core:/stable:/v1.29/rpm/repodata/repomd.xml.key
-exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
-EOF
-fi
-
-dnf -y makecache || exit 1
-dnf -y install kubelet kubeadm kubectl --disableexcludes=kubernetes || exit 1
-systemctl enable --now kubelet || exit 1
-
 mkdir -p /nfs/{k8s,master}  || exit 1
 
 if [[ ${HOSTNAME} = "master" ]] ; then
@@ -178,25 +108,6 @@ if [[ ${HOSTNAME} = "master" ]] ; then
     exportfs -ar || exit 1
     
     firewall-cmd --permanent --add-port={179,6443,2379,2380,10250,10259,10257}/tcp
-    if [[ ! -f /etc/kubernetes/manifests/kube-apiserver.yaml ]] ; then
-        DEFAULT_DEV=$(netstat -rn|grep "^0.0.0.0" |awk '{print $8}')
-        if [[ -z ${DEFAULT_DEV} ]] ; then
-            echo $0 error: DEFAULT_DEV not found, check command: netstat -rn >&2
-            exit 1
-        fi
-        MY_IP=$(ifconfig ${DEFAULT_DEV} | grep "broadcast" | awk '{print $2}')
-
-        echo EXEC: kubeadm init --pod-network-cidr ${POD_NETWORK_CIDR}  --apiserver-advertise-address=${MY_IP}
-        kubeadm init --pod-network-cidr ${POD_NETWORK_CIDR}  --apiserver-advertise-address=${MY_IP} || exit 1  
-        mkdir -p $K8S_HOME/.kube || exit 1
-        cp -i /etc/kubernetes/admin.conf $K8S_HOME/.kube/config || exit 1
-        chown -R k8s:k8s $K8S_HOME/.kube || exit 1
-    else
-        echo k8s is already initialized, when re-initialization is needed, destroy VMs via vagrant
-    fi
-
-    rm -f /tmp/join2cluster
-    kubeadm token create --print-join-command >/tmp/join2cluster || exit 1  
     
     echo Installing helm - will be required later
     export PATH=$PATH:/usr/local/bin
@@ -217,53 +128,6 @@ else
     firewall-cmd --permanent --add-port={179,10250,30000-32767}/tcp    
 fi
 firewall-cmd --reload || exit 1
-SCRIPT
-
-############################################################################
-# in previous steps we have prepared k8s join command, now command wil be copiet into worker VMs
-copy_join_command_sh = <<-SCRIPT
-test $(hostname -s) == "proxy-lb" && exit 0
-
-if [[ ${HOSTNAME} = "master" ]] ; then
-    K8S_HOME=$( getent passwd k8s | cut -d: -f6 )
-    if [ -f /tmp/join2cluster ] ; then
-        echo Copying join command to workers /tmp/join2cluster
-        scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${K8S_HOME}/.ssh/k8s.key /tmp/join2cluster k8s@node1:/tmp
-        scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${K8S_HOME}/.ssh/k8s.key /tmp/join2cluster k8s@node0:/tmp
-    else
-        echo $0 error: File /tmp/join2cluster not created
-        exit 1
-    fi
-fi
-SCRIPT
-
-##########################################################################
-# after join command was copiet into worker nodes, workers will join the cluster
-joining_setup_sh = <<-SCRIPT
-test $(hostname -s) == "proxy-lb" && exit 0
-
-K8S_HOME=$( getent passwd k8s | cut -d: -f6 )
-
-if [[ ${HOSTNAME} != "master" ]] ; then
-    let I=0
-    while :
-    do
-        if [ ! -f /tmp/join2cluster ] ; then
-            if [ $I -gt 24 ] ; then
-                echo $0 error: join command not delivered within 2 minutes >&2
-                exit 1
-            fi
-            echo Waiting for file /tmp/join2cluster 
-            sleep 5
-            let I+=1
-        else
-            break
-        fi
-    done
-    echo Joining cluster
-    bash /tmp/join2cluster || exit 1
-    rm -f /tmp/join2cluster 
-fi
 SCRIPT
 
 ######################################################################
@@ -436,32 +300,6 @@ echo Using PROXY - direct internet access is not allowed
 exit 0
 SCRIPT
 
-###############################################################
-# blockin outgoing port 443/tcp to force PROXY usage
-deny_outgoing_443_sh = <<-SCRIPT
-test $(hostname -s) == "proxy-lb" && exit 0
-
-# check for firewalld table in nft
-# this is not clean solution - perhaps k8s change nft structure and this will stop work
-nft -a list tables | grep -q firewalld
-if [[ $? != "0" ]] ; then
-    echo $0 error: nft table firewalld not found
-    exit 1
-fi
-
-# looking for oifname "lo" accept # handle 287 which should be in chain filter_OUTPUT
-HANDLE=$(nft -a list table inet firewalld |grep oifname | grep lo | awk '{print $6}')
-if [[ -z ${HANDLE} ]] ; then
-    echo $0 error: unable to find handle in chain filter_OUTPUT
-    exit 1
-fi   
-
-nft insert rule inet firewalld filter_OUTPUT position ${HANDLE} tcp dport 443 log prefix \\"OUTGOING_443: \\" reject || exit 1
-echo OUTPUT access to 443/tcp REJECTED, logged via syslog - but the rule is not saved !!!
-
-exit 0
-SCRIPT
-
 #####################################################################
 install_training_files_sh = <<-SCRIPT
 test ${HOSTNAME} != "master" && exit 0
@@ -546,37 +384,26 @@ Vagrant.configure("2") do |config|
   config.vm.define "proxy-lb" do |proxy|
     proxy.vm.hostname    = "proxy-lb"
     proxy.vm.provider "libvirt" do |v|
-      v.memory        = mem_for_support_vm
-      v.cpus          = cpu_for_support_vm
+      v.memory        = mem_for_proxy_vm
+      v.cpus          = cpu_for_proxy_vm
       v.graphics_type = 'none'
       v.uri           = "qemu:///system"  
     end
     proxy.vm.network :private_network, :ip => '10.10.10.99'
   end
 
-  config.vm.provision "system-init",          type: "shell",    run: "once", path: "./rocky9_baseline_setup.sh", \
-    env: {"DO_INCLUDE_FALCO" => ENV['DO_INCLUDE_FALCO']}
-  config.vm.provision "reload-after-update",  type: "reload",   run: "once"
-  config.vm.provision "copy-k8s-priv-key",    type: "file",     run: "once", source: "./k8s.key",     destination: "/tmp/k8s.key"
-  config.vm.provision "copy-k8s-pub-key",     type: "file",     run: "once", source: "./k8s.key.pub", destination: "/tmp/k8s.key.pub"
-  config.vm.provision "prepare-k8s-account",  type: "shell",    run: "once", path: "./prepare-k8s-account.sh"
-  config.vm.provision "firewall-n-proxy",     type: "shell",    run: "once", path: "./firewall_n_proxy_setup.sh", \
-    env: {"DO_USE_PROXY" => ENV['DO_USE_PROXY']}
-
-  #config.vm.provision "app-init",             type: "shell",    run: "once", path:  "./k8s-install-n-intit.sh", \
-  #  env: {"POD_NETWORK_CIDR" => ENV['POD_NETWORK_CIDR']}
-  # config.vm.provision "copy_join_command", type: "shell", run: "once", :inline => copy_join_command_sh
-  # config.vm.provision "join-cluster", type: "shell", run: "once", :inline => joining_setup_sh, \
-  #     env: {"POD_NETWORK_CIDR" => ENV['POD_NETWORK_CIDR']}
-  # config.vm.provision "install_cni", type: "shell", run: "once", :inline => install_cni_sh
-  # config.vm.provision "open_firewall4cni",    type: "shell", run: "once", :inline => open_firewall4cni_sh
-  # config.vm.provision "running_check",        type: "shell", run: "once", :inline => running_check_sh
-  # config.vm.provision "mount_nfs_on_clients", type: "shell", run: "once", :inline => mounting_nfs_on_clients_sh
-  # config.vm.provision "deny_tcp443",          type: "shell", run: "once", :inline => deny_outgoing_443_sh
-  # config.vm.provision "proxy_setup", type: "shell", run: "once", :inline => proxy_setup_sh
-  # config.vm.provision "copy-nginx-config", type: "file", source: "./nginx-lb-ingress.conf", destination: "/tmp/nginx-lb-ingress.conf", run: "once"
-  # config.vm.provision "copy-nginx-mngr", type: "file", source: "./nginx-mngr.sh", destination: "/tmp/nginx-mngr.sh", run: "once"
-  # config.vm.provision "copy-k8s-files", type: "file", source: "./k8s-files/", destination: "/tmp/k8s-files", run: "once"
-  # config.vm.provision "install_training_files", type: "shell", run: "once", :inline => install_training_files_sh 
-  # config.vm.provision "exec_training_batch", type: "shell", run: "once", :inline => exec_training_batch_sh
+  config.vm.provision "system-init",                type: "shell",    run: "once", path: "./rocky9_baseline_setup.sh", \
+    env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY}
+  config.vm.provision "reload-after-update",        type: "reload",   run: "once"
+  config.vm.provision "copy-k8s-priv-key",          type: "file",     run: "once", source: "../k8s.key",     destination: "/tmp/k8s.key"
+  config.vm.provision "copy-k8s-pub-key",           type: "file",     run: "once", source: "../k8s.key.pub", destination: "/tmp/k8s.key.pub"
+  config.vm.provision "prepare-k8s-account",        type: "shell",    run: "once", path: "./prepare-k8s-account.sh"
+  config.vm.provision "firewall-n-proxy",           type: "shell",    run: "once", path: "./firewall_n_proxy_setup.sh", \
+    env: {DO_USE_PROXY: DO_USE_PROXY}
+  config.vm.provision "k8s-install-config",         type: "shell",    run: "once", path: "./k8s-install-n-intit.sh", \
+    env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY, POD_NETWORK_CIDR: POD_NETWORK_CIDR, K8S_VERSION: K8S_VERSION}
+  config.vm.provision "k8s-kubelet-n-join",         type: "shell",    run: "once", path: "./kubelet-n-join.sh", \
+    env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY, POD_NETWORK_CIDR: POD_NETWORK_CIDR, K8S_VERSION: K8S_VERSION}
+  config.vm.provision "running_e2e_final_checks",   type: "shell",    run: "once", path: "./e2e_final_checks.sh", \
+    env: {DO_USE_PROXY: DO_USE_PROXY}
 end

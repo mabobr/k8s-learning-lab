@@ -9,11 +9,6 @@ echo Initializing proxy and firewall
 HOSTNAME=$(hostname -s)
 PORTS_TO_CLOSE="80 443"
 
-# in any case, enable firewall deny logs to debug network problems
-echo "Activate debug log for firewall denies"
-sed -i "s/LogDenied=.*/LogDenied=all/" /etc/firewalld/firewalld.conf
-systemctl reload firewalld
-
 if [[ ${HOSTNAME} != "proxy-lb" ]]; then
   grep -qF DO_USE_PROXY /home/k8s/.bashrc
   if [[ $? != "0" ]]; then    
@@ -25,9 +20,16 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
   if [[ ${HOSTNAME} != "proxy-lb" ]]; then
     # activate firewall on k8s nodes usoing nft, set enc variables
 
+    grep -Fq proxy-lb /etc/dnf/dnf.conf
+    if [[ $? != "0" ]]; then
+      echo >>/etc/dnf/dnf.conf
+      echo "# added by $0" >>/etc/dnf/dnf.conf
+      echo "proxy=http://proxy-lb:3128" >>/etc/dnf/dnf.conf
+    fi
+
     # check for firewalld table in nft
     # this is not clean solution - perhaps k8s change nft structure and this will stop work
-    nft list tables | grep -q firewalld
+    nft list tables | grep -q filter
     if [[ $? != "0" ]] ; then
       echo nft not initialized, initilizing
       nft add table inet filter || exit 1
@@ -37,7 +39,6 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
         nft add rule inet filter output ip protocol tcp tcp dport ${a_port} log prefix \"BLOCK_${a_port}_OUT: \" flags all counter || exit 1
         nft add rule inet filter output ip protocol tcp tcp dport ${a_port} reject || exit 1
       done
-      nft list ruleset > /etc/nftables.conf
 
       systemctl enable --now nftables || exit 1
     fi
@@ -59,6 +60,8 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
       echo 'access_log /var/log/squid/access.log human_time' >>/etc/squid/squid.conf
     fi
     systemctl enable --now squid || exit 1
+    # a few seconds to wait to squild wake up
+    sleep 5
   fi
 else
     # proxy is not used, direct connect to internet
