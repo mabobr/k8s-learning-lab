@@ -2,7 +2,7 @@
 # vi: set ft=ruby :
 
 # Check script: start-or-build-cluster.sh
-# NEXT is implement CNI on master - nodes are in notREADy state (2025-06-08)
+# NEXT is implement loadbalancer in proxy-lb
 
 
 ############################################################################
@@ -28,9 +28,13 @@ DO_INCLUDE_FALCO="false"
 DO_USE_PROXY="true"
 
 POD_NETWORK_CIDR="10.99.0.0/16"
+K8S_NETWORK_CIDR="10.10.10.0/24"
 
 # k8s version to install
-K8S_VERSION=1.33
+K8S_VERSION="1.33"
+
+# calico CNI version (2025-06-08)
+CALICO_VERSION="v3.30.1"
 
 ############################################################################
 # End od variables
@@ -96,16 +100,6 @@ test $(hostname -s) == "proxy-lb" && exit 0
 mkdir -p /nfs/{k8s,master}  || exit 1
 
 if [[ ${HOSTNAME} = "master" ]] ; then
-    # for k8s storage we will run NFS at master node
-    
-    chown nobody:nobody /nfs/{k8s,master} || exit 1
-    chmod 777 /nfs/{k8s,master} || exit 1
-    echo "/nfs/k8s      192.168.121.0/24(rw,sync,no_subtree_check)"   >/etc/exports
-    echo "/nfs/master   192.168.121.0/24(rw,sync,no_subtree_check)"   >>/etc/exports
-    systemctl enable --now nfs-server || exit 1
-    systemctl is-active nfs-server.service || exit 1
-    firewall-cmd --permanent --add-service={nfs,mountd,rpc-bind} || exit 1
-    exportfs -ar || exit 1
     
     firewall-cmd --permanent --add-port={179,6443,2379,2380,10250,10259,10257}/tcp
     
@@ -130,89 +124,12 @@ fi
 firewall-cmd --reload || exit 1
 SCRIPT
 
-######################################################################
-# installing CNI (calico) on master node
-install_cni_sh = <<-SCRIPT
-test $(hostname -s) == "proxy-lb" && exit 0
-
-if [[ $(hostname -s) == "master" ]] ; then
-    export KUBECONFIG=/etc/kubernetes/admin.conf
-
-    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.26.1/manifests/calico.yaml || exit 1        
-    echo Waiting for cluster to become ready, waiting for 3 ready nodes, max 5 min
-    let TTL=$(date +%s)+300
-    while :
-    do
-        CNT=$(kubectl get nodes | grep ' Ready ' | wc -l)
-        if [ $CNT -eq 3 ] ; then
-            break
-        fi
-        if [ $(date +%s) -gt ${TTL} ] ; then
-            echo $0 error: Cluster not ready in 5 minutes, check: kubectl get nodes
-            exit 1
-        fi
-        sleep 17
-        echo $(date)" Still waiting ... CNT=${CNT}"
-    done
-fi
-exit 0
-SCRIPT
-
-######################################################################
-# installing CNI (calico) on master node
-open_firewall4cni_sh = <<-SCRIPT
-test $(hostname -s) == "proxy-lb" && exit 0
-
-echo Allowing calico network intercommunication, new zone, adding interfaces, firewall
-ZONE_NAME=k8s_calico
-firewall-cmd --get-zones | grep -q "${ZONE_NAME}"
-if [[ $? != "0" ]] ; then
-    firewall-cmd --permanent --new-zone=${ZONE_NAME} || exit 1
-    firewall-cmd --permanent --zone=${ZONE_NAME} --set-target=ACCEPT || exit 1
-    firewall-cmd --permanent --zone=${ZONE_NAME} --add-interface=cali+ || exit 1
-    firewall-cmd --permanent --zone=${ZONE_NAME} --add-interface=tunl+ || exit 1
-    firewall-cmd  --permanent --add-rich-rule='rule family="ipv4" protocol value="4" accept' || exit 1
-    firewall-cmd --reload || exit 1
-fi
-SCRIPT
-
-#################################################################
-# # mount NFS on workers
-mounting_nfs_on_clients_sh = <<-SCRIPT
-test ${HOSTNAME} == "master" && exit 0
-# nfs is accessed form nodes and proxy-lb
-
-# # in workers we also mount NFS
-df -k | grep -q master:/nfs
-if [[ $? != "0" ]] ; then
-    echo Mounting NFS from master node on bothe worker nodes
-    mount master:/nfs/master /nfs/master
-else
-    echo NFS mounted
-fi
-exit 0
-SCRIPT
-
 #################################################################
 # final tests
 running_check_sh = <<-SCRIPT
 
 if [[ $(hostname -s) == "proxy-lb" ]] ; then
-    echo Verifying service status of squid
-    while :
-    do
-        systemctl is-active squid.service | grep -q activating
-        if [[ $? == "0" ]] ; then
-            sleep 5
-            continue
-        fi
-        break
-    done
-    systemctl is-active squid.service
-    if [[ $? != "0" ]] ; then
-        echo squid is not active, but: $(systemctl is-active squid.service)
-        exit 1
-    fi
+
 
     echo Verifying service status of nginx
     while :
@@ -397,13 +314,17 @@ Vagrant.configure("2") do |config|
   config.vm.provision "reload-after-update",        type: "reload",   run: "once"
   config.vm.provision "copy-k8s-priv-key",          type: "file",     run: "once", source: "../k8s.key",     destination: "/tmp/k8s.key"
   config.vm.provision "copy-k8s-pub-key",           type: "file",     run: "once", source: "../k8s.key.pub", destination: "/tmp/k8s.key.pub"
+  config.vm.provision "setup_nfs-server",           type: "shell",    run: "once", path: "./nfs-service-on-master.sh", \
+    env: {K8S_NETWORK_CIDR: K8S_NETWORK_CIDR}
   config.vm.provision "prepare-k8s-account",        type: "shell",    run: "once", path: "./prepare-k8s-account.sh"
   config.vm.provision "firewall-n-proxy",           type: "shell",    run: "once", path: "./firewall_n_proxy_setup.sh", \
     env: {DO_USE_PROXY: DO_USE_PROXY}
   config.vm.provision "k8s-install-config",         type: "shell",    run: "once", path: "./k8s-install-n-intit.sh", \
     env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY, POD_NETWORK_CIDR: POD_NETWORK_CIDR, K8S_VERSION: K8S_VERSION}
   config.vm.provision "k8s-kubelet-n-join",         type: "shell",    run: "once", path: "./kubelet-n-join.sh", \
-    env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY, POD_NETWORK_CIDR: POD_NETWORK_CIDR, K8S_VERSION: K8S_VERSION}
+    env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY, POD_NETWORK_CIDR: POD_NETWORK_CIDR, K8S_VERSION: K8S_VERSION, CALICO_VERSION: CALICO_VERSION}
+  config.vm.provision "mount-nfs",                  type: "shell",    run: "once", path: "./mount-nfs.sh"
   config.vm.provision "running_e2e_final_checks",   type: "shell",    run: "once", path: "./e2e_final_checks.sh", \
     env: {DO_USE_PROXY: DO_USE_PROXY}
+
 end

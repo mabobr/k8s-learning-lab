@@ -28,15 +28,40 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
 fi
 
 # are important service running
-for a_svc in containerd.service kubelet.service
-do
-  systemctl is-active --quiet ${a_svc}
-  if [[ $? != "0" ]]; then
-    echo $0 error: service ${a_svc} is not active >&2
+if [[ ${HOSTNAME} != "proxy-lb" ]]; then
+  for a_svc in containerd.service kubelet.service
+  do
+    echo Testing status of ${a_svc}
+    systemctl is-active --quiet ${a_svc}
+    if [[ $? != "0" ]]; then
+      echo $0 error: service ${a_svc} is not active >&2
+      exit 1
+    fi
+  done
+  test $? != "0" && exit $?
+else
+  if [[ ${DO_USE_PROXY} == "true" ]]; then
+    echo Testing status of squid.service
+    systemctl is-active --quiet squid.service
+    if [[ $? != "0" ]]; then
+      echo $0 error: service squid.service is not active >&2
+      exit 1
+    fi
+  fi
+fi
+
+if [[ ${HOSTNAME} == node* ]]; then
+  TXT=$(cat /nfs/master/test_file 2>/dev/null)
+  if [[ ${TXT} != "NFS works" ]]; then
+    echo $0 error: Unable to read data from NFS share >&2
     exit 1
   fi
-done
-test $? != "0" && exit $?
+  echo NFS service tested OK
+fi
+
+if [[ ${HOSTNAME} == "master" ]]; then
+  kubectl get nodes
+fi
 
 echo Final E2E check OK
 exit 0

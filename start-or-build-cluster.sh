@@ -1,9 +1,6 @@
 #!/bin/bash
 
 # All configuration parameters to cluster are in Vagrantfile
-
-echo error is failed to load kubelet config file, path: /var/lib/kubelet/config.yaml, error: failed to load Kubelet config
-exit 1
 VAGRANT_OPTIONS="--no-tty"
 
 #####################################################
@@ -31,8 +28,8 @@ do
 done < <(vagrant status | grep -F '(libvirt)' | cut -f1 -d'(' | awk '{print $2,$3}')
 
 if [[ ${STATUS} == "not created" ]]; then
-  vagrant ${VAGRANT_OPTIONS} up --parallel --provision-with system-init,reload-after-update,copy-k8s-priv-key,copy-k8s-pub-key,prepare-k8s-account,firewall-n-proxy || exit 1
-  vagrant ${VAGRANT_OPTIONS} up --parallel --provision-with k8s-install-config,k8s-kubelet-n-join || exit 1
+  vagrant ${VAGRANT_OPTIONS} up --parallel --provision-with system-init,reload-after-update,copy-k8s-priv-key,copy-k8s-pub-key,prepare-k8s-account,firewall-n-proxy,setup_nfs-server || exit 1
+  vagrant ${VAGRANT_OPTIONS} up --parallel --provision-with k8s-install-config,k8s-kubelet-n-join,mount-nfs || exit 1
 elif [[ ${STATUS} == "running" ]]; then
   echo Cluster is running
 elif [[ ${STATUS} == "shutoff" ]]; then
@@ -44,5 +41,5 @@ fi
 
 vagrant ${VAGRANT_OPTIONS} up --provision-with running_e2e_final_checks || exit 1
 
-echo Cluster ready
+echo Cluster ready check local file SANS_Kubernetes_Cloud_Native_Security_DevSecOps_Automation.pdf
 exit 0
