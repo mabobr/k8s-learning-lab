@@ -97,6 +97,7 @@ EOF
       K8S_HOME=$(getent passwd k8s | cut -d: -f6)
       mkdir -p ${K8S_HOME}/.kube || exit 1
       cp -i /etc/kubernetes/admin.conf $K8S_HOME/.kube/config || exit 1
+      echo "export KUBECONFIG=/etc/kubernetes/admin.conf" >>/root/.bashrc
       chown -R k8s:k8s $K8S_HOME/.kube || exit 1
 
       # creating and distributing join command

@@ -30,24 +30,28 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
     # check for firewalld table in nft
     # this is not clean solution - perhaps k8s change nft structure and this will stop work
     nft list tables | grep -q filter
-    if [[ $? != "0" ]] ; then
-      echo nft not initialized, initilizing
-      nft add table inet filter || exit 1
-      nft add chain inet filter output { type filter hook output priority 0\; } || exit 1
-      for a_port in ${PORTS_TO_CLOSE}
-      do
-        nft add rule inet filter output ip protocol tcp tcp dport ${a_port} log prefix \"BLOCK_${a_port}_OUT: \" flags all counter || exit 1
-        nft add rule inet filter output ip protocol tcp tcp dport ${a_port} reject || exit 1
-      done
-
-      systemctl enable --now nftables || exit 1
+    if [[ $? == "0" ]]; then
+      echo Flushing nft tables
+      nft flush ruleset
     fi
-    test $? != "0" && exit 1
+
+    echo nft not initialized, initilizing
+    nft add table inet filter || exit 1
+    nft add chain inet filter output { type filter hook output priority 0\; } || exit 1
+    for a_port in ${PORTS_TO_CLOSE}
+    do
+      nft add rule inet filter output ip protocol tcp tcp dport ${a_port} log prefix \"BLOCK_${a_port}_OUT: \" flags all counter || exit 1
+      nft add rule inet filter output ip protocol tcp tcp dport ${a_port} reject || exit 1
+    done
+
+    systemctl enable --now nftables || exit 1
+    systemctl is-active nftables || exit 1
 
     echo Testing firewall ...
     nc -z -w1 www.sme.sk 443
     if [[ $? == "0" ]]; then
-      echo $0 error: firewall setting does not work, fix me >&2
+      echo $0 error: firewall setting does not work, fix me, DO_USE_PROXY=${DO_USE_PROXY} >&2
+      echo $0 info: failed command was: nc -z -w1 www.sme.sk 443 >&2
       exit 1
     fi
     echo Outbount connect to 443, are blocked, check /var/log/messages to debug
@@ -60,8 +64,24 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
       echo 'access_log /var/log/squid/access.log human_time' >>/etc/squid/squid.conf
     fi
     systemctl enable --now squid || exit 1
-    # a few seconds to wait to squild wake up
+    # a few seconds to wait to squid wake up
     sleep 5
+  fi
+
+
+  CLUSTER_NODE_LIST=$(grep 10. /etc/hosts |awk '{print $2}'| grep -v proxy-lb |xargs | tr ' ' ,)
+  grep -Fq proxy-lb /root/.bashrc
+  if [[ $? != "0" ]]; then
+    echo "export HTTP_PROXY=http://proxy-lb:3128" >>/root/.bashrc
+    echo "export HTTPS_PROXY=http://proxy-lb:3128" >>/root/.bashrc
+    echo "export NO_PROXY=localhost,10.0.0.0/8,192.168.0.0/16,127.0.0.0/8,${CLUSTER_NODE_LIST}" >>/root/.bashrc
+  fi
+  K8S_HOME=$(getent passwd k8s | cut -d: -f6)
+  grep -Fq proxy-lb ${K8S_HOME}/.bashrc
+  if [[ $? != "0" ]]; then
+    echo "export HTTP_PROXY=http://proxy-lb:3128" >>${K8S_HOME}/.bashrc
+    echo "export HTTPS_PROXY=http://proxy-lb:3128" >>${K8S_HOME}/.bashrc
+    echo "export NO_PROXY=localhost,10.0.0.0/8,192.168.0.0/16,127.0.0.0/8,${CLUSTER_NODE_LIST}" >>${K8S_HOME}/.bashrc
   fi
 else
     # proxy is not used, direct connect to internet

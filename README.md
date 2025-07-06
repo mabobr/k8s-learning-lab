@@ -12,3 +12,8 @@ ssh-keygen -t ed25519 -f ./k8s.key -q -N ""
 # Consult and set variables in Vagrantfile
 vagrant up
 ```
+
+## Next
+- NFS is prepared for shared volume (DONE)
+- deploy permanent shared volume
+- deploy busybox as web server
