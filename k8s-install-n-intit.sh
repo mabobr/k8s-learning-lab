@@ -113,6 +113,7 @@ EOF
     else
       echo k8s is already initialized, when re-initialization is needed, destroy VMs via vagrant
     fi
+    mkdir -p --mode 1777 /tmp/k8s.d || exit 1
   fi
 fi
 echo k8s installed and initialized

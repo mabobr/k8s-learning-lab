@@ -252,6 +252,30 @@ else
     exit 1
 fi
 SCRIPT
+
+#####################################################################
+init_deployer_sh = <<-SCRIPT
+  test $(hostname -s) != "master" && exit 0
+  
+  rm -rf /home/k8s/deployments
+  if [[ ! -d /home/k8s/deployments ]]; then
+    mkdir /home/k8s/deployments || exit 1
+    chown k8s:k8s /home/k8s/deployments || exit 1
+  fi
+
+  if [[ -d /tmp/k8s.d ]]; then
+    cd /tmp/k8s.d || exit 1
+    mv deployer.sh /home/k8s || exit 1
+    chown k8s:k8s /home/k8s/deployer.sh || exit 1
+    chmod 755 /home/k8s/deployer.sh || exit 1
+
+    cp -p * /home/k8s/deployments
+    chown k8s:k8s /home/k8s/deployments/*
+    chmod 644 /home/k8s/deployments/*
+    rm -f *
+  fi
+  exit 0
+SCRIPT
 #####################################################################
 Vagrant.configure("2") do |config|
   
@@ -324,6 +348,8 @@ Vagrant.configure("2") do |config|
   config.vm.provision "k8s-kubelet-n-join",         type: "shell",    run: "once", path: "./kubelet-n-join.sh", \
     env: {DO_INCLUDE_FALCO: DO_INCLUDE_FALCO, DO_USE_PROXY: DO_USE_PROXY, POD_NETWORK_CIDR: POD_NETWORK_CIDR, K8S_VERSION: K8S_VERSION, CALICO_VERSION: CALICO_VERSION}
   config.vm.provision "mount-nfs",                  type: "shell",    run: "once", path: "./mount-nfs.sh"
+  config.vm.provision "copy-files-for-master",      type: "file",     source: "./files-2-master/", destination: "/tmp/k8s.d", run: "always"
+  config.vm.provision "init-deployer",              type: "shell",    run: "always", :inline => init_deployer_sh
   config.vm.provision "running_e2e_final_checks",   type: "shell",    run: "once", path: "./e2e_final_checks.sh", \
     env: {DO_USE_PROXY: DO_USE_PROXY}
 
