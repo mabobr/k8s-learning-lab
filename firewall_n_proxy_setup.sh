@@ -18,7 +18,7 @@ fi
 
 if [[ ${DO_USE_PROXY} == "true" ]]; then
   if [[ ${HOSTNAME} != "proxy-lb" ]]; then
-    # activate firewall on k8s nodes usoing nft, set enc variables
+    # activate firewall on k8s nodes using nft, set enc variables
 
     grep -Fq proxy-lb /etc/dnf/dnf.conf
     if [[ $? != "0" ]]; then
@@ -55,6 +55,8 @@ if [[ ${DO_USE_PROXY} == "true" ]]; then
       exit 1
     fi
     echo Outbount connect to 443, are blocked, check /var/log/messages to debug
+    # 2025-08-09: saving nftables, we believe, it will bre reloadin on reboot each time
+    nft list ruleset > /etc/nftables/firewall-for-web-k8s-lab.nft 2>/dev/null
   else
     dnf -y install squid || exit 1
     # change form of logs

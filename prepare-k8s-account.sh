@@ -35,6 +35,8 @@ if [[ ${HOSTNAME} == "proxy-lb" ]]; then
     echo "k8s  ALL=(ALL)       NOPASSWD: ALL" >/etc/sudoers.d/k8s-to-root
   fi
 fi
+mkdir -p ${HOME}/deployments || exit 1
+chown k8s:k8s ${HOME}/deployments || exit 1
 
 echo App account k8s ready
 exit 0

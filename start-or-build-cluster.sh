@@ -39,6 +39,10 @@ else
   exit 1
 fi
 
+vagrant ${VAGRANT_OPTIONS} provision master --provision-with copy-files-for-master || exit 1
+vagrant ${VAGRANT_OPTIONS} provision master --provision-with init-deployer || exit 1
+# here exec deployer
+
 vagrant ${VAGRANT_OPTIONS} up --provision-with running_e2e_final_checks || exit 1
 
 echo Cluster ready check local file SANS_Kubernetes_Cloud_Native_Security_DevSecOps_Automation.pdf
